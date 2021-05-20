@@ -70,14 +70,37 @@ jobs:
         fi
     - uses: actions/upload-artifact@v2
       with:
-        name: scorecard
+        name: Benchmark_v1.2_Scorecard_for_ShiftLeft
         path: scorecard
-    - name: Benchmark scorecard PR notification
-      uses: actions/github-script@v3
+
+    - name: Generate Results Checksum
+      run: |
+        OWASP_BENCHMARK_CHECKSUM=$(tail -n +2 scorecard/Benchmark_v1.2_Scorecard_for_ShiftLeft.csv |
+          sort |
+          tr -d '[:space:]' |
+          tr '[:upper:]' '[:lower:]' |
+          shasum |
+          tr -d " -")
+        echo "OWASP_BENCHMARK_CHECKSUM=$OWASP_BENCHMARK_CHECKSUM" >> $GITHUB_ENV
+
+    - uses: actions/setup-node@v2
+      with:
+        node-version: 14
+    - run: npm install jwt-decode node-fetch
       if: github.event_name == 'pull_request'
+
+    - name: Notify Benchmark Results
+      uses: actions/github-script@v4
+      if: github.event_name == 'pull_request'
+      env:
+        OWASP_BENCHMARK_CHECKSUM: ${{ env.OWASP_BENCHMARK_CHECKSUM }}
+        SHIFTLEFT_USER_ID_V2: 73ee2ed7-2a43-4aec-9873-7db642c73526
+        SHIFTLEFT_ACCESS_TOKEN: ${{ secrets.SHIFTLEFT_ACCESS_TOKEN }}
+        
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
         script: |
+          // Leave a comment on the PR
           const { issue: { number: issue_number }, repo: { owner, repo }  } = context;
           const run = await github.actions.getWorkflowRun({
                 owner: context.repo.owner,
@@ -87,3 +110,28 @@ jobs:
           const loc = run.data.html_url ? '[GitHub Action](' + run.data.html_url + ')' : 'GitHub Action';
           const body = '👋 ' + '@' + context.actor + ' OWASP Benchmark scorecard is available for download in the Artifacts Section of ' + loc;
           github.issues.createComment({ issue_number, owner, repo, body });
+
+          // Report the results
+          const jwt_decode = require('jwt-decode');
+          const fetch = require("node-fetch");
+          const {
+            SHIFTLEFT_API_HOST,
+            SHIFTLEFT_ACCESS_TOKEN,
+            SHIFTLEFT_USER_ID_V2,
+            OWASP_BENCHMARK_CHECKSUM,
+          } = process.env;
+          const decoded = jwt_decode(SHIFTLEFT_ACCESS_TOKEN);
+          const orgID = decoded.orgID;
+          const apiHost = SHIFTLEFT_API_HOST || 'www.shiftleft.io';
+          fetch(`https://${apiHost}/api/v4/private/orgs/${orgID}/bi_proxy/owasp_benchmark_complete`, {
+            headers: {
+              "Content-Type": "application/json; charset=utf-8",
+              "Authorization": `Bearer ${SHIFTLEFT_ACCESS_TOKEN}`,
+            },
+            method: 'POST',
+            body: JSON.stringify({
+              artifact_url: run.data.html_url || '',
+              result_sha1: OWASP_BENCHMARK_CHECKSUM,
+              user_id_v2: SHIFTLEFT_USER_ID_V2,
+            })
+          })
